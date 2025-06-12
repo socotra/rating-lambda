@@ -1,30 +1,28 @@
 package com.socotra.lambda;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.socotra.coremodel.ElementCategory;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.socotra.coremodel.RatingSet;
-import com.socotra.coremodel.RatingItem;
-import com.socotra.deployment.customer.*;
 import com.socotra.deployment.customer.RatePlugin;
-import com.socotra.platform.tools.ULID;
-import com.socotra.coremodel.Element;
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 public class RatingLambdaHandler implements RequestHandler<Map<String, Object>, Map<String, Object>> {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private final MyRatingPlugin plugin = new MyRatingPlugin();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .registerModule(new JavaTimeModule())
+            .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    private final EarnixRatingPlugin plugin = new EarnixRatingPlugin();
 
     @Override
     public Map<String, Object> handleRequest(Map<String, Object> input, Context context) {
+        MAPPER.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         try {
             context.getLogger().log("Raw input: " + input + "\n");
 
@@ -41,35 +39,17 @@ public class RatingLambdaHandler implements RequestHandler<Map<String, Object>, 
 
             if (inputNode.has("quote")) {
                 context.getLogger().log("Detected 'quote' request\n");
-                RatePlugin.PersonalAutoQuoteRequest request =
+                RatePlugin.PersonalAutoQuoteRequest request = null;
+                 request =
                         MAPPER.treeToValue(inputNode, RatePlugin.PersonalAutoQuoteRequest.class);
+                 context.getLogger().log("Request looks like " + request.toString());
 
-                // Inject mock element if needed
-                for (PersonalVehicle pv : request.quote().personalVehicles()) {
-                    if (pv instanceof PersonalVehicleQuote pvq) {
-                        Fire fire = pvq.fire();
-                        if (fire instanceof FireQuote fq && fq.element() == null) {
-                            Element mockElement = Element.builder()
-                                    .type("FireQuote")
-                                    .locator(ULID.generate())
-                                    .tenantLocator(UUID.randomUUID())
-                                    .category(ElementCategory.coverage)
-                                    .build();
-
-                            FireQuote fixed = fq.toBuilder().element(mockElement).build();
-                            PersonalVehicleQuote fixedVehicle = pvq.toBuilder().fire(fixed).build();
-                            // replace the fire quote in the list (you may need to rebuild the full quote)
-                            // or if this is a copy, inject later before calling rate()
-                        }
-                    }
-                }
-
-                result = plugin.rate(request);
+                result = plugin.rate(request, context.getLogger());
             } else if (inputNode.has("segment")) {
                 context.getLogger().log("Detected 'segment' request\n");
                 RatePlugin.PersonalAutoRequest request =
                         MAPPER.treeToValue(inputNode, RatePlugin.PersonalAutoRequest.class);
-                result = plugin.rate(request);
+                result = plugin.rate(request, context.getLogger());
             } else {
                 context.getLogger().log("Invalid payload\n");
                 ObjectNode error = MAPPER.createObjectNode();
@@ -77,7 +57,7 @@ public class RatingLambdaHandler implements RequestHandler<Map<String, Object>, 
                 return MAPPER.convertValue(error, Map.class);
             }
 
-            return MAPPER.convertValue(result, Map.class);
+            return Map.of("ratingSet", result);
 
         } catch (Exception e) {
             context.getLogger().log("Error: " + e.toString() + "\n");
