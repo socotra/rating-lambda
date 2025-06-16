@@ -4,6 +4,7 @@ import com.amazonaws.services.lambda.runtime.LambdaLogger;
 import com.fasterxml.jackson.databind.*;
 import com.socotra.coremodel.RatingSet;
 import com.socotra.coremodel.RatingItem;
+import com.socotra.coremodel.ValidationItem;
 import com.socotra.deployment.AbstractDeploymentFactory;
 import com.socotra.deployment.customer.*;
 import com.socotra.platform.tools.ULID;
@@ -16,6 +17,8 @@ import java.time.Period;
 import java.util.*;
 
 public class EarnixRatingPlugin implements RatePlugin {
+
+    private LambdaLogger logger;
 
 //    protected static final ObjectMapper mapper = AbstractDeploymentFactory
 //            .defaultMapper()
@@ -82,10 +85,10 @@ public class EarnixRatingPlugin implements RatePlugin {
 
     private RatingItem flatRateWithTaxes(ULID locator, double baseAmount) {
         double total =
-                baseAmount +                  // Base premium
-                        (baseAmount * 0.08) +         // FSL (8%)
-                        (baseAmount * 0.10) +         // GST (10%)
-                        (baseAmount * 0.09);          // SD (9%)
+                baseAmount/12.0; //+                  // Base premium
+//                        (baseAmount * 0.08) +         // FSL (8%)
+//                        (baseAmount * 0.10) +         // GST (10%)
+//                        (baseAmount * 0.09);          // SD (9%)
 
         return RatingItem.builder()
                 .elementLocator(locator)
@@ -95,6 +98,7 @@ public class EarnixRatingPlugin implements RatePlugin {
     }
 
     private double getRatingFactor(PersonalVehicle vehicle, PersonalAuto quote, String coverageType) {
+        logger.log("============= Get Rating Factor Called =============");
         String coverage = coverageType != null ? coverageType : "";
 
         String stateCode = vehicle.data().vehicleLicenseState();
@@ -172,6 +176,10 @@ public class EarnixRatingPlugin implements RatePlugin {
             default -> 1.0;
         };
 
+        logger.log(String.format(
+                "stateFactor: coverage=%s, state=%s → %f",
+                coverage, state, stateFactor));
+
         double damageFactor = switch (damage) {
             case "No Damage" -> switch (coverage) {
                 case "Fire" -> 1.0;
@@ -196,6 +204,10 @@ public class EarnixRatingPlugin implements RatePlugin {
             };
             default -> 1.0;
         };
+
+        logger.log(String.format(
+                "damageFactor: coverage=%s, damage=%s → %f",
+                coverage, damage, damageFactor));
 
         double licenceFactor = switch (licence) {
             case "Learner Permit or Licence" -> switch (coverage) {
@@ -228,6 +240,10 @@ public class EarnixRatingPlugin implements RatePlugin {
             };
             default -> 1.0;
         };
+
+        logger.log(String.format(
+                "licenceFactor: coverage=%s, licence=%s → %f",
+                coverage, licence, licenceFactor));
 
         double excessFactor = switch (excess) {
             case "100" -> switch (coverage) {
@@ -289,6 +305,10 @@ public class EarnixRatingPlugin implements RatePlugin {
             default -> 1.0;
         };
 
+        logger.log(String.format(
+                "excessFactor: coverage=%s, excess=%s → %f",
+                coverage, excess, excessFactor));
+
         double usageFactor = switch (usage) {
             case "1-2" -> switch (coverage) {
                 case "Theft" -> 1.5;
@@ -310,6 +330,10 @@ public class EarnixRatingPlugin implements RatePlugin {
             };
             default -> 1.0;
         };
+
+        logger.log(String.format(
+                "usageFactor: coverage=%s, usage=%s → %f",
+                coverage, usage, usageFactor));
 
         int vehicleYear = vehicle.data().year() != null ? vehicle.data().year() : 2020;
         double yearFactor = switch (vehicleYear) {
@@ -417,6 +441,10 @@ public class EarnixRatingPlugin implements RatePlugin {
             }
         };
 
+        logger.log(String.format(
+                "yearFactor: coverage=%s, year=%d → %f",
+                coverage, vehicleYear, yearFactor));
+
         int driverLicenseAge = 5; // default if no dob
         if (vehicle.data().drivers() != null && !vehicle.data().drivers().isEmpty()) {
             LocalDate dob = vehicle.data()
@@ -500,6 +528,10 @@ public class EarnixRatingPlugin implements RatePlugin {
             };
         };
 
+        logger.log(String.format(
+                "driverAgeFactor: coverage=%s, licenseAge=%d → %f",
+                coverage, driverLicenseAge, driverLicenseAgeFactor));
+
         // Parse the priorClaims field (string) into an integer count
         int claims = 0; // default
         if (quote != null
@@ -560,15 +592,31 @@ public class EarnixRatingPlugin implements RatePlugin {
             }
         };
 
-        return stateFactor * damageFactor * licenceFactor * excessFactor *
-                usageFactor * yearFactor * driverLicenseAgeFactor * claimsFactor;
+        logger.log(String.format(
+                "claimsFactor: coverage=%s, claims=%d → %f",
+                coverage, claims, claimsFactor));
+
+        double totalFactor = stateFactor
+                * damageFactor
+                * licenceFactor
+                * excessFactor
+                * usageFactor
+                * yearFactor
+                * driverLicenseAgeFactor
+                * claimsFactor;
+        logger.log("→ totalFactor = " + totalFactor);
+
+        logger.log("============= Rating Factor Finished =============");
+        return totalFactor;
     }
 
-    private RatingItem rateFire(PersonalVehicle vehicle, PersonalAuto quote, LambdaLogger logger) {
+    private RatingItem rateFire(PersonalVehicle vehicle, PersonalAuto quote) {
         double baseRate = 100.0;
         double finalRate = baseRate * getRatingFactor(vehicle, quote, "Fire");
 
-        logger.log("Final rate is: " + finalRate);
+        logger.log(String.format(
+                "Fire Rate: Base Rate=%f, Final Rate=%f",
+                baseRate, finalRate));
         logger.log("Vehicle is : " + vehicle);
 
 //        Element mockElement = Element.builder()
@@ -580,55 +628,72 @@ public class EarnixRatingPlugin implements RatePlugin {
 //        FireQuote fq = new FireQuote(vehicle.fire().PADeductible(), vehicle.fire().PALimit(), mockElement);
 
         return RatingItem.builder()
-                .elementLocator(quote.locator())
+                .elementLocator(vehicle.fire().locator())
                 .chargeType(ChargeType.premium)
-                .rate(BigDecimal.valueOf(finalRate))
+                .rate(BigDecimal.valueOf(finalRate/12))
                 .build();
     }
 
     private RatingItem rateTheft(PersonalVehicle vehicle, PersonalAuto quote) {
         double baseRate = 100.0;
         double finalRate = baseRate * getRatingFactor(vehicle, quote, "Theft");
+
+        logger.log(String.format(
+                "Theft Rate: Base Rate=%f, Final Rate=%f",
+                baseRate, finalRate));
+
         return RatingItem.builder()
-                .elementLocator(vehicle.locator())
+                .elementLocator(vehicle.theft().locator())
                 .chargeType(ChargeType.premium)
-                .rate(BigDecimal.valueOf(finalRate))
+                .rate(BigDecimal.valueOf(finalRate/12))
                 .build();
     }
 
     private RatingItem rateOwnDamage(PersonalVehicle vehicle, PersonalAuto quote) {
         double baseRate = 200.0;
         double finalRate = baseRate * getRatingFactor(vehicle, quote, "OwnDamage");
+        logger.log(String.format(
+                "Own Damage Rate: Base Rate=%f, Final Rate=%f",
+                baseRate, finalRate));
         return RatingItem.builder()
                 .elementLocator(vehicle.ownDamage().locator())
                 .chargeType(ChargeType.premium)
-                .rate(BigDecimal.valueOf(finalRate))
+                .rate(BigDecimal.valueOf(finalRate/12))
                 .build();
     }
 
     private RatingItem rateThirdParty(PersonalVehicle vehicle, PersonalAuto quote) {
         double baseRate = 80.0;
         double finalRate = baseRate * getRatingFactor(vehicle, quote, "ThirdParty");
+        logger.log(String.format(
+                "Third Party Rate: Base Rate=%f, Final Rate=%f",
+                baseRate, finalRate));
         return RatingItem.builder()
                 .elementLocator(vehicle.thirdParty().locator())
                 .chargeType(ChargeType.premium)
-                .rate(BigDecimal.valueOf(finalRate))
+                .rate(BigDecimal.valueOf(finalRate/12))
                 .build();
     }
 
     private RatingItem rateWindscreen(PersonalVehicle vehicle) {
+        logger.log(String.format(
+                "Windscreen Rate: Base Rate=%f, Final Rate=%f",
+                20.0, 20.0));
         return RatingItem.builder()
                 .elementLocator(vehicle.windscreen().locator())
                 .chargeType(ChargeType.premium)
-                .rate(BigDecimal.valueOf(20))
+                .rate(BigDecimal.valueOf(20.0/12.0))
                 .build();
     }
 
     private RatingItem rateBabySeat(PersonalVehicle vehicle) {
+        logger.log(String.format(
+                "Baby Seat Rate: Base Rate=%f, Final Rate=%f",
+                20.0, 20.0));
         return RatingItem.builder()
                 .elementLocator(vehicle.babySeat().locator())
                 .chargeType(ChargeType.premium)
-                .rate(BigDecimal.valueOf(20))
+                .rate(BigDecimal.valueOf(20.0/12.0))
                 .build();
     }
 
@@ -636,12 +701,14 @@ public class EarnixRatingPlugin implements RatePlugin {
         PersonalAutoQuote personalAutoQuote = request.quote();
         BigDecimal duration = request.duration();
         List<RatingItem> ratingItems = new ArrayList<>();
+        this.logger = logger;
+
         for(PersonalVehicle vehicle : personalAutoQuote.personalVehicles()) {
             if (vehicle.ownDamage() != null) {
                 ratingItems.add(rateOwnDamage(vehicle, personalAutoQuote));
             }
             if (vehicle.fire() != null) {
-                ratingItems.add(rateFire(vehicle, personalAutoQuote, logger));
+                ratingItems.add(rateFire(vehicle, personalAutoQuote));
             }
             if (vehicle.theft() != null) {
                 ratingItems.add(rateTheft(vehicle, personalAutoQuote));
@@ -657,9 +724,7 @@ public class EarnixRatingPlugin implements RatePlugin {
             }
         }
 
-        if (ratingItems.isEmpty()) {
-            ratingItems.add(flatRateWithTaxes(request.quote().locator(), 35));
-        }
+        ratingItems.add(flatRateWithTaxes(request.quote().locator(), 35));
 
         return RatingSet.builder().ok(true).ratingItems(ratingItems).build();
     }
@@ -669,12 +734,13 @@ public class EarnixRatingPlugin implements RatePlugin {
         List<RatingItem> ratingItems = new ArrayList<>();
         List<PersonalVehicle> personalVehicles = new ArrayList<>();
         request.segment().ifPresent(s -> personalVehicles.addAll(s.personalVehicles()));
-        for(PersonalVehicle vehicle : personalVehicles){
+        this.logger = logger;
+        for(PersonalVehicle vehicle : personalVehicles) {
             if (vehicle.ownDamage() != null) {
                 ratingItems.add(rateOwnDamage(vehicle, request.segment().get()));
             }
             if (vehicle.fire() != null) {
-                ratingItems.add(rateFire(vehicle, request.segment().get(), logger));
+                ratingItems.add(rateFire(vehicle, request.segment().get()));
             }
             if (vehicle.theft() != null) {
                 ratingItems.add(rateTheft(vehicle, request.segment().get()));
@@ -691,9 +757,7 @@ public class EarnixRatingPlugin implements RatePlugin {
         }
 
         //request.segment().ifPresent(s-> ratingItems.add(rateFee(s.locator(), duration)));
-        if (ratingItems.isEmpty()) {
-            request.segment().ifPresent(s-> ratingItems.add(flatRateWithTaxes(request.segment().get().locator(), 35)));
-        }
+        request.segment().ifPresent(s-> ratingItems.add(flatRateWithTaxes(request.segment().get().locator(), 35)));
 
         return RatingSet.builder().ok(true).ratingItems(ratingItems).build();
     }
